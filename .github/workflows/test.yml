@@ -1,0 +1,113 @@
+name: rustls_ffi_test
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+  merge_group:
+  schedule:
+    - cron: '15 12 * * 3'
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ]
+        include:
+          - os: ubuntu-latest
+            archive: rustls-ffi-x86_64-linux-gnu
+          - os: macos-latest
+            archive: rustls-ffi-arm64-macos
+          - os: macos-13
+            archive: rustls-ffi-x86_64-macos
+          - os: windows-latest
+            archive: rustls-ffi-x86_64-windows
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # TODO(@cpu): use something like robinraju/release-downloader@v1 once
+      #   releases are published w/ binary artifacts.
+      - name: Download rustls-ffi artifact
+        uses: actions/download-artifact@v4
+        with:
+          repository: 'rustls/rustls-ffi'
+          # GH token can be removed when we switch to public releases.
+          github-token: ${{ secrets.GH_PAT }}
+          # Pinned to PR rustls-ffi#506 workflow:
+          #  https://github.com/rustls/rustls-ffi/actions/runs/12456098501
+          run-id: 12456098501
+
+      # .pc files aren't relocatable. We need to update the prefix to point to
+      # the correct location that we extracted the archive. This seems more reliable
+      # than using `--define-prefix` - it seems to tack an extra 'lib/' subcomponent
+      # onto the include path that breaks the build.
+      - name: Replace .pc prefix
+        # We use bash shell explicitly to avoid PowerShell on Windows and to ensure we have 'sed'.
+        shell: bash
+        # For further fun, sed isn't consistent between macOS and Linux.
+        run: |
+          case "${{ runner.os }}" in
+            "macOS")
+              sed -i '' "s|prefix=.*|prefix=${{ matrix.archive }}|" ${{ matrix.archive }}/lib/pkgconfig/rustls.pc
+              ;;
+            *)
+              sed -i "s|prefix=.*|prefix=${{ matrix.archive }}|" ${{ matrix.archive }}/lib/pkgconfig/rustls.pc
+              ;;
+          esac
+
+      # Dump out what pkg-config says about the rustls package.
+      - name: Debug pkg-config
+        run: |
+          pkg-config --cflags rustls
+          pkg-config --libs rustls
+        env:
+          PKG_CONFIG_PATH: ${{ matrix.archive }}/lib/pkgconfig
+
+      # Set up the cmake build, overriding PKG_CONFIG_PATH to
+      # point to the extracted rustls-ffi archive.
+      - name: Setup cmake build (UNIX)
+        if: matrix.os != 'windows-latest'
+        env:
+          PKG_CONFIG_PATH: ${{ matrix.archive }}/lib/pkgconfig
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      # Set up the cmake build, overriding PKG_CONFIG_PATH to
+      # point to the extracted rustls-ffi archive.
+      #
+      # For Windows cmake needs some help finding the strawberry perl pkg-config
+      # that's installed in the runner's PATH.
+      - name: Setup cmake build (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          PKG_CONFIG_PATH: ${{ matrix.archive }}/lib/pkgconfig
+        run: cmake -DPKG_CONFIG_EXECUTABLE=C:\Strawberry\perl\bin\pkg-config.bat -S . -B build
+
+      # Build the rustls-ffi-test binary.
+      - name: Build rustls-ffi-test (UNIX)
+        if: matrix.os != 'windows-latest'
+        run: cmake --build build -v
+
+      # Build the rustls-ffi-test binary.
+      # On Windows we need to specify a configuration to avoid a warning about using the default
+      # debug MSCRT runtime with a lib built with the release MSCRT runtime.
+      - name: Build rustls-ffi-test (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cmake --build build --config Release -v
+
+      # Run the rustls-ffi-test binary.
+      - name: Run rustls-ffi-test (UNIX)
+        if: matrix.os != 'windows-latest'
+        run: ./build/rustls-ffi-test
+
+      # Run the rustls-ffi-test binary.
+      # On Windows it's in a different output location under build.
+      - name: Run rustls-ffi-test (Windows)
+        if: matrix.os == 'windows-latest'
+        run: ./build/Release/rustls-ffi-test.exe
